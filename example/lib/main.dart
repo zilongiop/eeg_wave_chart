@@ -123,7 +123,7 @@ class DemoHomePage extends StatelessWidget {
                 _DemoEntryCard(
                   icon: Icons.blur_on,
                   title: 'EEG 脑地形图',
-                  subtitle: '时序波形 + Alpha 频段功率热力图',
+                  subtitle: '8 通道时序波形 + Alpha 频段功率热力图',
                   onTap: () => _open(context, const DemoBrainPage()),
                 ),
                 const SizedBox(height: 16),
