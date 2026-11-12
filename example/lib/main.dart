@@ -1,14 +1,40 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:eeg_wave_chart/eeg_wave_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:eeg_wave_chart/eeg_wave_chart.dart';
 
+import 'ble_eeg_page.dart';
+import 'blue/blue.dart' as ble;
+import 'common/prefs_manager.dart';
 import 'demo_brain_page.dart';
 import 'real_data_page.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 蓝牙初始化失败也不该挡住其它 Demo 入口，失败信息留在控制台排查。
+  try {
+    await PrefsManager.i.init();
+    // configure 必须早于 init：iOS 的 CBCentralManager 在 init 订阅适配器
+    // 状态时就被创建，State Restoration 开关只能在此之前设置。
+    await ble.BlueManager.configure(logLevel: ble.BlueLogLevel.warning);
+    ble.BlueManager.i.init(
+      notifyUuids: ble.EegUuid.notifyUuids,
+      writeUuids: <String>[ble.EegUuid.configCommand],
+      // 样机固件尚未实现证书握手，认证开关保持关闭。
+      securityEnabled: false,
+      // 高频 EEG 推送下逐包打日志会挤占波形绘制的时间。
+      enableLog: false,
+    );
+    // 挂上 EEG 协议层：连接成功后自动绑定 5 大服务并订阅 Sensor Data，
+    // 解析出的 0x8B 帧通过 EegSamplesEvent 分发给波形页。
+    await ble.EegDeviceService.i.attach();
+  } catch (error) {
+    debugPrint('[BLE] 初始化失败：$error');
+  }
+
   runApp(const MyApp());
 }
 
@@ -106,6 +132,13 @@ class DemoHomePage extends StatelessWidget {
                   title: '真实采集数据回放',
                   subtitle: '设备日志解析 · 500Hz · CH7/CH8 为 1mV 5Hz 正弦',
                   onTap: () => _open(context, const RealDataPage()),
+                ),
+                const SizedBox(height: 16),
+                _DemoEntryCard(
+                  icon: Icons.bluetooth,
+                  title: '蓝牙实时脑波',
+                  subtitle: '扫描连接 EEG 设备 · 实时解析 0x8B 数据帧',
+                  onTap: () => _open(context, const BleEegPage()),
                 ),
               ],
             ),

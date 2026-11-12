@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>需要蓝牙权限以扫描并连接 EEG 脑波设备，实时接收脑电数据</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>需要蓝牙权限以连接 EEG 脑波设备并接收脑电数据</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
