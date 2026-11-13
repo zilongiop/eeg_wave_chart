@@ -1,93 +1,126 @@
 import 'dart:math';
 import 'dart:ui';
+
 import 'package:flutter/material.dart';
+
 import '../models/brain/brain_data.dart';
 
+/// 默认热力色表，从左到右由低到高：绿 → 黄 → 橙 → 红。
+///
+/// 热力图插值与底部色条共用这份色表，外部可以通过
+/// `BrainHeatMapWidget(colors: ...)` 或 [BrainTopoPainter.colors] 覆盖。
+const List<Color> defaultHeatColors = <Color>[
+  Color(0xFF4FD96E), // Low  绿
+  Color(0xFFFFE03D), //      黄
+  Color(0xFFFF9A3D), //      橙
+  Color(0xFFF5443C), // High 红
+];
+
+/// 热力图画笔：绘制椭圆（width == height 时退化为正圆）热力区域与底部水平色条，
+/// 可选在电极点绘制通道名。越界的插值格子由椭圆轮廓裁剪。
 class BrainTopoPainter extends CustomPainter {
+  /// 频段数据（电极归一化坐标、实时功率、量程）
   final BandData data;
-  final double headRadius;
+
+  /// 热力色表，从左到右由低到高；热力图与色条共用
+  final List<Color> colors;
+
+  /// 插值网格步长（逻辑像素），越小越细腻、计算量越大
   final double gridStep;
+
+  /// 是否绘制内置图例标题（内容取自 [BandData.title]）
+  final bool showLegend;
+
+  /// 是否在电极点绘制通道名（CH1~CH8）
   final bool showElectrodeText;
+
+  /// 通道名字体颜色（仅 [showElectrodeText] 为真时生效）
+  final Color electrodeTextColor;
+
+  /// 横向偏移量（逻辑像素）：把整个热场、电极与色条在画布内水平平移，
+  /// 便于把热场对齐到非居中的狗脸；默认 0 表示水平居中于画布。
+  final double offsetX;
+
+  /// 构造时记录 revision 快照。BandData 是原地更新的，新旧 painter 持有
+  /// 同一个对象，直接比较字段会永远相等、导致热力图不重绘。
+  final int _revision;
 
   BrainTopoPainter({
     required this.data,
-    this.headRadius = 120,
+    this.colors = defaultHeatColors,
     this.gridStep = 6.0,
+    this.showLegend = false,
     this.showElectrodeText = false,
-  });
+    this.electrodeTextColor = Colors.white,
+    this.offsetX = 0.0,
+  }) : _revision = data.revision;
 
-  static final List<Color> _heatLut = () {
-    final lut = List<Color>.filled(256, Colors.black);
+  static const double _barHeight = 12.0;
+  static const double _barGap = 14.0;
+  static const double _barBottom = 10.0;
+  static const double _legendHeight = 22.0;
+
+  List<Color> get _palette => colors.isEmpty ? defaultHeatColors : colors;
+
+  /// 256 级颜色查表，避免每个格子都做 Color.lerp
+  late final List<Color> _lut = _buildLut(_palette);
+
+  static List<Color> _buildLut(List<Color> palette) {
+    final List<Color> lut = List<Color>.filled(256, Colors.transparent);
     for (int i = 0; i < 256; i++) {
-      final ratio = i / 255.0;
-      lut[i] = _rawHeatColor(ratio);
+      lut[i] = _lerpColor(palette, i / 255.0);
     }
     return lut;
-  }();
-
-  static Color _rawHeatColor(double ratio) {
-    final r = ratio.clamp(0.0, 1.0);
-    if (r < 0.25) {
-      return Color.lerp(Colors.blue, Colors.cyan, r / 0.25)!;
-    } else if (r < 0.50) {
-      return Color.lerp(Colors.cyan, Colors.green, (r - 0.25) / 0.25)!;
-    } else if (r < 0.75) {
-      return Color.lerp(Colors.green, Colors.yellow, (r - 0.50) / 0.25)!;
-    } else {
-      return Color.lerp(Colors.yellow, Colors.red, (r - 0.75) / 0.25)!;
-    }
   }
 
-  static Color getHeatmapLut(double ratio) {
-    int idx = (ratio.clamp(0.0, 1.0) * 255).round();
-    return _heatLut[idx];
+  static Color _lerpColor(List<Color> palette, double ratio) {
+    if (palette.length == 1) return palette.first;
+    final double r = ratio < 0 ? 0.0 : (ratio > 1 ? 1.0 : ratio);
+    final double scaled = r * (palette.length - 1);
+    int i = scaled.floor();
+    if (i < 0) i = 0;
+    if (i > palette.length - 2) i = palette.length - 2;
+    return Color.lerp(palette[i], palette[i + 1], scaled - i)!;
+  }
+
+  Color _colorOf(double ratio) {
+    final double r = ratio < 0 ? 0.0 : (ratio > 1 ? 1.0 : ratio);
+    return _lut[(r * 255).round()];
   }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2 - 20, size.height / 2 + 10);
-    final double radiusX = headRadius;
-    final double radiusY = headRadius * 1.1;
-    final Rect headRect = Rect.fromCenter(
-      center: center,
-      width: radiusX * 2,
-      height: radiusY * 2,
-    );
-    // 填充、裁剪、描边复用同一条轮廓，保证热力区域边界与圆圈严格重合。
-    final Path headPath = Path()..addOval(headRect);
+    // 顶部按需给内置标题留位，底部留出水平色条的空间，其余区域画正圆
+    // 热力图；直径由传入的 width / height 中较小者决定。
+    final double legendHeight = (showLegend && data.title.isNotEmpty) ? _legendHeight : 0.0;
+    final double reserved = _barHeight + _barGap + _barBottom;
+    final double heatAreaH = size.height - reserved - legendHeight;
+    // 热场形状由画布宽高决定为「椭圆」：rx 取宽度一半，ry 取热区高度一半。
+    // width == height-36 时退化为正圆；两者不等即椭圆。
+    final double rx = size.width / 2;
+    final double ry = heatAreaH / 2;
+    if (rx <= 0 || ry <= 0) return;
+    final Offset center = Offset(size.width / 2 + offsetX, legendHeight + heatAreaH / 2);
 
-    final headFillPaint = Paint()
-      ..isAntiAlias = true
-      ..color = Colors.white.withOpacity(0.1)
-      ..style = PaintingStyle.fill;
-    // 描边放到热力格子之后画；半透明白只淡淡勾出头部轮廓，不抢热力图。
-    final headStrokePaint = Paint()
-      ..isAntiAlias = true
-      ..color = const Color(0xB3FFFFFF)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
-
-    canvas.drawPath(headPath, headFillPaint);
-
-    // 逐格矩形直接画到椭圆外会形成台阶状锯齿。按轮廓做抗锯齿裁剪后，
-    // 越界的格子被椭圆曲线切掉，边缘与描边一致。
+    final Path heatPath = Path()
+      ..addOval(Rect.fromCenter(center: center, width: rx * 2, height: ry * 2));
     canvas.save();
-    canvas.clipPath(headPath);
+    canvas.clipPath(heatPath);
 
-    // 电极坐标与格点无关，提到循环外只算一次。
+    // 电极的 dx/dy 是 [0,1] 归一化坐标，映射到以椭圆中心为原点的范围。
     final List<Offset> electrodeOffsets = <Offset>[
       for (final Electrode ele in data.electrodes)
-        Offset(ele.dx * radiusX * 2 - radiusX, ele.dy * radiusY * 2 - radiusY),
+        Offset((ele.dx - 0.5) * rx * 2, (ele.dy - 0.5) * ry * 2),
     ];
+    final double span = data.maxVal - data.minVal;
     final Paint cellPaint = Paint();
-    for (double y = -radiusY; y <= radiusY; y += gridStep) {
-      for (double x = -radiusX; x <= radiusX; x += gridStep) {
-        // 用格子中心判定归属：原来按左上角判定，格子会整体向右下外扩一格。
+
+    for (double y = -ry; y <= ry; y += gridStep) {
+      for (double x = -rx; x <= rx; x += gridStep) {
+        // 按格心判定归属；椭圆外的格子交给上面的 clipPath 裁剪。
         final double cx = x + gridStep / 2;
         final double cy = y + gridStep / 2;
-        final ellipse =
-            (cx / radiusX) * (cx / radiusX) + (cy / radiusY) * (cy / radiusY);
-        if (ellipse > 1.0) continue;
+        if ((cx / rx) * (cx / rx) + (cy / ry) * (cy / ry) > 1.0) continue;
 
         double numerator = 0.0;
         double denominator = 0.0;
@@ -101,91 +134,94 @@ class BrainTopoPainter extends CustomPainter {
           denominator += weight;
         }
 
-        final val = denominator == 0 ? 0 : numerator / denominator;
-        final double ratio =
-            ((val - data.minVal) / (data.maxVal - data.minVal)).clamp(0.0, 1.0);
-
-        cellPaint.color = getHeatmapLut(ratio).withOpacity(0.85);
+        final double val = denominator == 0 ? 0 : numerator / denominator;
+        final double ratio = span == 0 ? 0 : (val - data.minVal) / span;
+        cellPaint.color = _colorOf(ratio);
         // 略大于步长，消除相邻矩形因浮点取整留下的细缝。
         canvas.drawRect(
-          Rect.fromLTWH(
-            center.dx + x,
-            center.dy + y,
-            gridStep + 0.5,
-            gridStep + 0.5,
-          ),
+          Rect.fromLTWH(center.dx + x, center.dy + y, gridStep + 0.5, gridStep + 0.5),
           cellPaint,
         );
       }
     }
     canvas.restore();
 
-    final dotPaint = Paint()..color = Colors.white;
-    for (int i = 0; i < data.electrodes.length; i++) {
-      final Electrode ele = data.electrodes[i];
-      final px = center.dx + electrodeOffsets[i].dx;
-      final py = center.dy + electrodeOffsets[i].dy;
-      canvas.drawCircle(Offset(px, py), 3, dotPaint);
-
-      if (showElectrodeText) {
-        final text = "${ele.name}\n${ele.value.toStringAsFixed(1)}";
-        final tp = TextPainter(
-          text: TextSpan(
-            text: text,
-            style: const TextStyle(color: Colors.white, fontSize: 10),
+    // 电极点与通道名：画在裁剪之外，避免被椭圆边缘切掉。
+    if (showElectrodeText) {
+      final Paint dotPaint = Paint()..color = Colors.white;
+      final TextPainter tp = TextPainter(textDirection: TextDirection.ltr);
+      for (final Electrode ele in data.electrodes) {
+        final Offset p = Offset(
+          center.dx + (ele.dx - 0.5) * rx * 2,
+          center.dy + (ele.dy - 0.5) * ry * 2,
+        );
+        canvas.drawCircle(p, 3, dotPaint);
+        tp.text = TextSpan(
+          text: ele.name,
+          style: TextStyle(
+            color: electrodeTextColor,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            shadows: const <Shadow>[Shadow(color: Colors.black54, blurRadius: 2)],
           ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        tp.paint(canvas, Offset(px + 5, py - 10));
+        );
+        tp.layout();
+        tp.paint(canvas, Offset(p.dx + 5, p.dy - 8));
       }
     }
 
-    // 轮廓与鼻子最后画，避免被热力格子覆盖；抗锯齿描边同时压住裁剪后
-    // 可能残留的半像素毛边。
-    canvas.drawPath(headPath, headStrokePaint);
-    final Path nosePath = Path()
-      ..moveTo(center.dx, center.dy - radiusY)
-      ..lineTo(center.dx - 8, center.dy - radiusY - headRadius * 0.15)
-      ..lineTo(center.dx + 8, center.dy - radiusY - headRadius * 0.15)
-      ..close();
-    canvas.drawPath(nosePath, headStrokePaint);
+    _paintLegend(canvas, size, center, legendHeight);
 
-    final barX = size.width - 15;
-    final barTop = center.dy - headRadius;
-    final barHeight = headRadius * 2;
-    final barPaint = Paint();
-    for (int i = 0; i < barHeight; i++) {
-      final r = 1.0 - i / barHeight;
-      barPaint.color = getHeatmapLut(r);
-      canvas.drawRect(Rect.fromLTWH(barX, barTop + i, 10, 1), barPaint);
-    }
+    // 色条放底部，从左到右 = colors 的 Low → High，与热力图同一套色表。
+    final Rect barRect = Rect.fromLTWH(
+      center.dx - rx,
+      legendHeight + heatAreaH + _barGap,
+      rx * 2,
+      _barHeight,
+    );
+    final List<Color> palette = _palette;
+    final Paint barPaint = Paint()
+      ..shader = LinearGradient(
+        colors: palette.length == 1 ? <Color>[palette.first, palette.first] : palette,
+      ).createShader(barRect);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(barRect, const Radius.circular(_barHeight / 2)),
+      barPaint,
+    );
+  }
 
-    // TextPainter 必须先 layout() 算出文字几何信息，才能 paint()，
-    // 否则会抛 "Text geometry was not yet calculated"。
-    (TextPainter(
+  /// 内置图例标题：内容取自 [BandData.title]，居中画在顶部预留区。
+  /// TextPainter 必须先 layout() 才能 paint()，否则会抛文字几何未计算的异常。
+  void _paintLegend(Canvas canvas, Size size, Offset center, double legendHeight) {
+    if (!showLegend || data.title.isEmpty || legendHeight <= 0) return;
+    final TextPainter tp = TextPainter(
       text: TextSpan(
-        text: "${data.maxVal.toInt()}",
-        style: const TextStyle(color: Colors.white, fontSize: 10),
+        text: data.title,
+        style: const TextStyle(color: Color(0xFF37474F), fontSize: 12, fontWeight: FontWeight.w500),
       ),
       textDirection: TextDirection.ltr,
-    )..layout())
-        .paint(canvas, Offset(barX + 12, barTop - 5));
-
-    (TextPainter(
-      text: TextSpan(
-        text: "${data.minVal.toInt()}",
-        style: const TextStyle(color: Colors.white, fontSize: 10),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout())
-        .paint(canvas, Offset(barX + 12, barTop + barHeight));
+      textAlign: TextAlign.center,
+    )..layout(maxWidth: size.width);
+    tp.paint(canvas, Offset(center.dx - tp.width / 2, (legendHeight - tp.height) / 2 - 40));
   }
 
   @override
   bool shouldRepaint(covariant BrainTopoPainter oldDelegate) {
-    return oldDelegate.data.revision != data.revision ||
+    return oldDelegate._revision != _revision ||
         oldDelegate.gridStep != gridStep ||
+        oldDelegate.showLegend != showLegend ||
         oldDelegate.showElectrodeText != showElectrodeText ||
-        oldDelegate.headRadius != headRadius;
+        oldDelegate.electrodeTextColor != electrodeTextColor ||
+        oldDelegate.offsetX != offsetX ||
+        !_sameColors(oldDelegate.colors, colors);
+  }
+
+  static bool _sameColors(List<Color> a, List<Color> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 }

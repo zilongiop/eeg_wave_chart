@@ -4,12 +4,7 @@ class Electrode {
   final double dy;
   double value;
 
-  Electrode({
-    required this.name,
-    required this.dx,
-    required this.dy,
-    this.value = 0,
-  });
+  Electrode({required this.name, required this.dx, required this.dy, this.value = 0});
 }
 
 class BandData {

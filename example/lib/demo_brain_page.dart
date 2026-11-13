@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:eeg_wave_chart/eeg_wave_chart.dart';
 
@@ -145,21 +144,15 @@ class _DemoBrainPageState extends State<DemoBrainPage> {
           const Divider(),
           Expanded(
             flex: 2,
-            child: ClipRRect(
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                child: BrainHeatMapWidget(
-                  initData: _bandData,
-                  rawPowerNotifier: _powerNotifier,
-                  emaAlpha: 0.2,
-                  throttleMs: 250,
-                  // painter 已做椭圆裁剪，格子越小内部越细腻；插值计算已优化，
-                  // 8 电极下 2px 网格每 250ms 刷新一次仍然流畅。
-                  gridStep: 2.0,
-                  // 标出 8 个电极名称与实时功率，便于对照上方波形通道。
-                  showElectrodeText: true,
-                ),
-              ),
+            child: BrainHeatMapWidget(
+              initData: _bandData,
+              rawPowerNotifier: _powerNotifier,
+              emaAlpha: 0.2,
+              throttleMs: 250,
+              // width / height 可指定画布尺寸，留空则按父约束自适应；
+              // colors 可外部传入，默认绿 → 黄 → 橙 → 红，色条在底部。
+              // 圆形裁剪 + 2px 网格，边缘平滑且内部足够细腻。
+              gridStep: 2.0,
             ),
           ),
         ],
